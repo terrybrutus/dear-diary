@@ -8,6 +8,8 @@ import {spawn} from 'node:child_process';
 const root=fileURLToPath(new URL('../',import.meta.url)),frontend=resolve(root,'src/frontend');
 if(existsSync(resolve(root,'.env.local'))){const env=parseEnv(readFileSync(resolve(root,'.env.local'),'utf8'));for(const [k,v] of Object.entries(env))if(!process.env[k])process.env[k]=v;}
 const require=createRequire(resolve(frontend,'package.json'));
+// PostCSS/Tailwind resolve their config from cwd, including during local preview.
+process.chdir(frontend);
 const {createServer}=await import(pathToFileURL(require.resolve('vite')).href);
 const vite=await createServer({root:frontend,server:{middlewareMode:true},appType:'spa'});
 const port=4173,origin=`http://127.0.0.1:${port}`;
