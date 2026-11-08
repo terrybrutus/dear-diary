@@ -1,0 +1,17 @@
+{
+  "overview": "A minimal, generic ICP starter app with a single placeholder landing page that confirms the React frontend and Motoko backend are wired together, ready to build on.",
+  "features": [
+    "A single placeholder landing page showing the generic app name",
+    "Frontend and backend connected as one full-stack ICP project",
+    "Clean project structure ready to export to GitHub and re-import into Caffeine AI",
+    "Builds and typechecks without errors"
+  ],
+  "category": "starter-app",
+  "tags": [
+    "starter",
+    "skeleton",
+    "icp",
+    "scaffold"
+  ],
+  "last_updated": "2026-11-08T16:03:20.208Z"
+}
