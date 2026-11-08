@@ -8,6 +8,8 @@
     "npm": "please use pnpm"
   },
   "scripts": {
+    "local": "node scripts/local.mjs",
+    "start": "node scripts/launch.mjs",
     "build": "pnpm -r --if-present run build",
     "typecheck": "pnpm -r --if-present run typecheck",
     "check": "pnpm -r --if-present run check",

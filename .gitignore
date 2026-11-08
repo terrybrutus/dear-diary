@@ -6,3 +6,9 @@ dist/
 .pnpm-store/
 .cache/
 .icp/
+.env
+.env.local
+.env.*.local
+*.tsbuildinfo
+backups/
+*.log
