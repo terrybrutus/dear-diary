@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import "fake-indexeddb/auto";
 import type { InternetIdentityContext } from "@caffeineai/core-infrastructure";
 import { cleanup, configure } from "@testing-library/react";
 import type { PropsWithChildren } from "react";

@@ -1,121 +1,159 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-
-import type { backendInterface } from "@/backend";
-import { UserRole } from "@/backend";
-import { render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
-
-import App from "@/App";
-import { renderWithActor } from "./test-utils";
-
-const APP_NAME = "Dear Diary";
-
-function makeActor(
-  overrides: Partial<Pick<backendInterface, "getCallerUserRole">> = {},
-) {
-  const getCallerUserRole = vi.fn<backendInterface["getCallerUserRole"]>(
-    async () => UserRole.guest,
+import { render, screen, within, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import App from "../App";
+import { KEY, emptyJournal } from "../journal";
+beforeEach(() => {
+  localStorage.clear();
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({ configured: false }),
+      }),
   );
-  const actor = {
-    getCallerUserRole,
-    ...overrides,
-  } satisfies Pick<backendInterface, "getCallerUserRole">;
-  return { actor, getCallerUserRole };
-}
-
-describe("App placeholder page", () => {
-  it("renders the app name and landing copy without a blank screen", async () => {
-    const { actor } = makeActor();
-    renderWithActor(<App />, actor);
-
-    expect(screen.getByRole("heading", { name: APP_NAME })).toBeInTheDocument();
-    expect(
-      screen.getByText("A quiet place to keep your personal trading journal."),
-    ).toBeInTheDocument();
-    // The header also carries the app name.
-    expect(screen.getAllByText(APP_NAME).length).toBeGreaterThanOrEqual(2);
-  });
-
-  it("sets the browser tab title to exactly the app name", () => {
-    const html = readFileSync(resolve(process.cwd(), "index.html"), "utf8");
-    const title = html.match(/<title>([\s\S]*?)<\/title>/)?.[1]?.trim();
-    expect(title).toBe(APP_NAME);
-  });
-
-  it("confirms the backend is reachable by calling the generated actor", async () => {
-    const { actor, getCallerUserRole } = makeActor();
-    renderWithActor(<App />, actor);
-
-    expect(
-      await screen.findByTestId("backend.success_state"),
-    ).toHaveTextContent("Backend reachable");
-    expect(getCallerUserRole).toHaveBeenCalledTimes(1);
-  });
-
-  it("shows a non-blank error state when the backend call rejects", async () => {
-    const { actor } = makeActor({
-      getCallerUserRole: vi.fn<backendInterface["getCallerUserRole"]>(
-        async () => {
-          throw new Error("unreachable");
-        },
-      ),
-    });
-    renderWithActor(<App />, actor);
-
-    // The hook retries once, so the error state appears after the retry backoff.
-    expect(
-      await screen.findByTestId("backend.error_state", {}, { timeout: 5000 }),
-    ).toHaveTextContent("Backend not reachable");
-    // The placeholder content still renders, so the page is never blank.
-    expect(screen.getByRole("heading", { name: APP_NAME })).toBeInTheDocument();
-  });
-
-  it("renders the placeholder without any navigation or extra sections", async () => {
-    const { actor } = makeActor();
-    renderWithActor(<App />, actor);
-
-    await waitFor(() =>
-      expect(screen.getByTestId("backend.success_state")).toBeInTheDocument(),
+});
+describe("Local journal workflows", () => {
+  it("saves a reflection and trade, derives metrics, and restores them on remount", async () => {
+    const user = userEvent.setup(),
+      view = render(<App />);
+    await user.click(screen.getByRole("button", { name: "New journal entry" }));
+    let dialog = screen.getByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Title"), "Followed my plan");
+    await user.type(
+      within(dialog).getByLabelText("Reflection"),
+      "Waited patiently for my setup.",
     );
-    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
-    expect(screen.queryByRole("form")).not.toBeInTheDocument();
-    expect(screen.queryByRole("table")).not.toBeInTheDocument();
-  });
-
-  it("shows the same app name in the header brand and the hero heading", async () => {
-    const { actor } = makeActor();
-    renderWithActor(<App />, actor);
-
-    const heading = screen.getByRole("heading", { level: 1 });
-    const brand = screen.getByText(heading.textContent ?? "", {
-      selector: "header span",
-    });
-
-    // The name is duplicated across two independent constants; the rename must
-    // keep both surfaces in agreement rather than updating only one.
-    expect(brand).toHaveTextContent(heading.textContent ?? "");
-    expect(heading.textContent?.trim().length).toBeGreaterThan(0);
-  });
-
-  it("renders the caffeine.ai attribution link in the footer", async () => {
-    const { actor } = makeActor();
-    renderWithActor(<App />, actor);
-
-    const link = screen.getByRole("link", { name: /caffeine\.ai/i });
-    expect(link).toHaveAttribute(
-      "href",
-      expect.stringContaining("caffeine.ai"),
+    await user.click(
+      within(dialog).getByRole("button", { name: "Save entry" }),
     );
-  });
-
-  it("shows the loading state before the backend call resolves", async () => {
-    const { actor } = makeActor();
-    renderWithActor(<App />, actor);
-
-    expect(screen.getByTestId("backend.loading_state")).toBeInTheDocument();
     expect(
-      await screen.findByTestId("backend.success_state"),
+      within(dialog).getByRole("heading", { name: "Followed my plan" }),
     ).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Trades" }));
+    await user.type(within(dialog).getByLabelText("Symbol"), "NQ");
+    await user.type(
+      within(dialog).getByLabelText(/Net P\/L/, { selector: "input" }),
+      "250",
+    );
+    const risk = within(dialog).getByLabelText(/Initial risk/);
+    await user.clear(risk);
+    await user.type(risk, "100");
+    await user.click(
+      within(dialog).getByRole("button", { name: "Save trade" }),
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Close day" }));
+    expect(JSON.parse(localStorage.getItem(KEY)!).trades[0].pnl).toBe(250);
+    expect(screen.getByText("+2.50R")).toBeInTheDocument();
+    view.unmount();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "Dashboard" }));
+    expect(
+      screen.getByRole("heading", { name: "Followed my plan" }),
+    ).toBeInTheDocument();
+  });
+  it("edits and deletes persisted trades and searches losing days with real navigation", async () => {
+    const d = emptyJournal();
+    d.trades = [
+      {
+        id: "t1",
+        date: "2026-11-05",
+        symbol: "ES",
+        side: "Short",
+        pnl: -100,
+        risk: 50,
+        setup: "Reversal",
+        notes: "",
+      },
+    ];
+    localStorage.setItem(KEY, JSON.stringify(d));
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "Ask your journal" }));
+    await user.click(
+      screen.getByRole("button", { name: "Show my losing days" }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "November 5, 2026" }),
+    );
+    expect(screen.getByRole("dialog")).toHaveTextContent("November 5, 2026");
+    await user.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Trades",
+      }),
+    );
+    await user.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Edit ES",
+      }),
+    );
+    const pnl = within(screen.getByRole("dialog")).getByLabelText(/Net P\/L/, {
+      selector: "input",
+    });
+    await user.clear(pnl);
+    await user.type(pnl, "75");
+    await user.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Save trade",
+      }),
+    );
+    expect(JSON.parse(localStorage.getItem(KEY)!).trades[0].pnl).toBe(75);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    await user.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Delete ES",
+      }),
+    );
+    expect(JSON.parse(localStorage.getItem(KEY)!).trades).toEqual([]);
+  });
+  it("provides all sidebar workflows and saves setups, tags, and goal progress", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    for (const name of [
+      "Analytics",
+      "AI Insights",
+      "Reports",
+      "Import / Sync",
+      "Settings",
+    ]) {
+      await user.click(screen.getByRole("button", { name }));
+      expect(
+        screen.getByRole("heading", { level: 1, name }),
+      ).toBeInTheDocument();
+    }
+    await user.click(screen.getByRole("button", { name: "Playbook" }));
+    await user.type(screen.getByLabelText("Setup name"), "ORB");
+    await user.type(
+      screen.getByLabelText("Entry, exit, and risk rules"),
+      "Wait for retest",
+    );
+    await user.click(screen.getByRole("button", { name: "Save setup" }));
+    await user.click(screen.getByRole("button", { name: "Tags & Setups" }));
+    await user.type(screen.getByLabelText("New tag"), "Patient");
+    await user.click(screen.getByRole("button", { name: "Add tag" }));
+    await user.click(screen.getByRole("button", { name: "Goals" }));
+    await user.type(screen.getByLabelText("Goal name"), "Reflect daily");
+    await user.type(screen.getByLabelText("Goal target"), "2");
+    await user.click(screen.getByRole("button", { name: "Add goal" }));
+    await user.click(screen.getByRole("button", { name: "Log progress" }));
+    const saved = JSON.parse(localStorage.getItem(KEY)!);
+    expect(saved.plays[0].name).toBe("ORB");
+    expect(saved.tags).toEqual(["Patient"]);
+    expect(saved.goals[0].current).toBe(1);
+  });
+  it("blocks overwrites when another tab changes journal storage", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    fireEvent(window, new StorageEvent("storage", { key: KEY }));
+    await user.click(screen.getByRole("button", { name: "New journal entry" }));
+    const dialog = screen.getByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Title"), "A note");
+    await user.type(within(dialog).getByLabelText("Reflection"), "x");
+    await user.click(
+      within(dialog).getByRole("button", { name: "Save entry" }),
+    );
+    expect(localStorage.getItem(KEY)).toBeNull();
   });
 });
