@@ -30,7 +30,18 @@ import {
   X,
   CandlestickChart,
   PanelLeftClose,
+  Paperclip,
+  Mic,
 } from "lucide-react";
+import { DayMedia, MediaLibrary } from "./components/DayMedia";
+import {
+  listMedia,
+  subscribeMedia,
+  downloadBlob,
+  restoreMediaAndJournal,
+  type MediaRecord,
+} from "./media-store";
+import { createJournalBackup, readJournalBackup } from "./media-backup";
 import {
   KEY,
   emptyJournal,
@@ -54,6 +65,7 @@ const nav = [
   ["Tags & Setups", Tags],
   ["Reports", FileText],
   ["Goals", Target],
+  ["Media Library", Paperclip],
   ["Import / Sync", ArrowUpFromLine],
   ["Settings", Settings],
 ] as const;
@@ -107,8 +119,35 @@ export default function App() {
     [aiReady, setAiReady] = useState(false),
     [query, setQuery] = useState(""),
     [search, setSearch] = useState("");
+  const [media, setMedia] = useState<MediaRecord[]>([]),
+    [mediaError, setMediaError] = useState(""),
+    [captureBusy, setCaptureBusy] = useState(false),
+    [backupBusy, setBackupBusy] = useState(false);
+  const reflectionField = useRef<HTMLTextAreaElement>(null),
+    titleField = useRef<HTMLInputElement>(null);
   const file = useRef<HTMLInputElement>(null),
     chatEnd = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    let live = true;
+    const refresh = () => {
+      listMedia()
+        .then((records) => {
+          if (live) {
+            setMedia(records);
+            setMediaError("");
+          }
+        })
+        .catch((error) => {
+          if (live) setMediaError(error.message);
+        });
+    };
+    refresh();
+    const unsubscribe = subscribeMedia(refresh);
+    return () => {
+      live = false;
+      unsubscribe();
+    };
+  }, []);
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
     localStorage.setItem("diary-theme", dark ? "dark" : "light");
@@ -160,13 +199,13 @@ export default function App() {
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        setDay(null);
+        if (!captureBusy) setDay(null);
         setChat(false);
       }
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, []);
+  }, [captureBusy]);
   useEffect(() => {
     const h = (e: StorageEvent) => {
       if (e.key === KEY) {
@@ -319,22 +358,63 @@ export default function App() {
       ]);
     setBusy(false);
   }
-  const backup = () =>
-    download(
-      `dear-diary-${dateKey()}-${Date.now()}.json`,
-      JSON.stringify(data, null, 2),
+  async function backup() {
+    if (captureBusy) {
+      setNotice("Stop and save your recording before exporting a backup.");
+      return false;
+    }
+    setBackupBusy(true);
+    try {
+      const archive = await createJournalBackup(data);
+      downloadBlob(`dear-diary-${dateKey()}-${Date.now()}.zip`, archive);
+      setNotice(
+        "Journal + media backup downloaded. Keep it somewhere private.",
+      );
+      return true;
+    } catch (error) {
+      setNotice(`Backup failed: ${(error as Error).message}`);
+      return false;
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+  function useTranscript(text: string) {
+    const field = reflectionField.current,
+      title = titleField.current;
+    if (field) {
+      field.value = [field.value.trim(), text.trim()]
+        .filter(Boolean)
+        .join("\n\n");
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    if (title && !title.value.trim()) title.value = `Voice reflection · ${day}`;
+    setNotice(
+      "Transcript added to your reflection draft. Review it, then save the entry.",
     );
+  }
   async function importBackup(f: File) {
     try {
-      const incoming = parseJournal(await f.text());
+      if (blocked)
+        throw new Error(
+          "Reload this page before restoring a backup. Saving is paused.",
+        );
+      const incoming = await readJournalBackup(f);
       if (
         confirm(
-          `Replace this browser's journal with ${incoming.trades.length} trades and ${incoming.entries.length} entries? Your current journal will download first.`,
+          `Restore ${incoming.journal.trades.length} trades, ${incoming.journal.entries.length} entries${incoming.media ? ` and ${incoming.media.length} media files (replacing this media library)` : "; this older JSON backup leaves existing media unchanged"}? Your current journal and media will download first.`,
         )
       ) {
-        backup();
-        if (persist(incoming))
-          setNotice("Backup restored. Your journal is ready.");
+        if (!(await backup())) return;
+        if (incoming.media) {
+          await restoreMediaAndJournal(
+            incoming.media,
+            JSON.stringify(incoming.journal),
+            KEY,
+          );
+          setData(incoming.journal);
+          setNotice("Journal and original media restored.");
+        } else if (persist(incoming.journal))
+          setNotice("Journal restored. Existing media files were kept.");
       }
     } catch (e) {
       setNotice((e as Error).message);
@@ -531,8 +611,13 @@ export default function App() {
               </p>
             </div>
             <div className="heading-actions">
-              <button className="secondary" onClick={backup}>
-                <ArrowDownToLine size={16} /> Export journal
+              <button
+                className="secondary"
+                onClick={backup}
+                disabled={backupBusy}
+              >
+                <ArrowDownToLine size={16} />{" "}
+                {backupBusy ? "Preparing backup…" : "Export journal"}
               </button>
               <button
                 className="primary"
@@ -714,23 +799,30 @@ export default function App() {
                             key = dateKey(date),
                             ts = data.trades.filter((t) => t.date === key),
                             es = data.entries.filter((e) => e.date === key),
+                            files = media.filter((r) => r.date === key),
                             net = stats(ts).net;
                           return (
                             <button
                               key={key}
-                              aria-label={`${pretty(key)}, ${ts.length} trades, ${es.length} journal entries`}
+                              aria-label={`${pretty(key)}, ${ts.length} trades, ${es.length} journal entries, ${files.length} attachments`}
                               className={`day ${date.getMonth() !== month.getMonth() ? "outside" : ""} ${key === dateKey() ? "is-today" : ""}`}
                               onClick={() => openDay(key)}
                             >
                               <span className="day-number">
                                 {date.getDate()}
                               </span>
-                              {(ts.length > 0 || es.length > 0) && (
+                              {(ts.length > 0 ||
+                                es.length > 0 ||
+                                files.length > 0) && (
                                 <div
                                   className={`day-card ${ts.length ? (net > 0 ? "profit" : net < 0 ? "loss" : "neutral") : "journal-only"}`}
                                 >
                                   <div className="day-pnl">
-                                    {ts.length ? money(net) : "Reflection"}
+                                    {ts.length
+                                      ? money(net)
+                                      : es.length
+                                        ? "Reflection"
+                                        : "Day media"}
                                     <ChevronRight size={15} />
                                   </div>
                                   {ts.length > 0 && (
@@ -744,6 +836,19 @@ export default function App() {
                                       <Pencil size={12} />
                                       {es.length} journal{" "}
                                       {es.length === 1 ? "entry" : "entries"}
+                                    </div>
+                                  )}
+                                  {files.length > 0 && (
+                                    <div className="entry-count">
+                                      {files.some((r) => r.kind === "audio") ? (
+                                        <Mic size={12} />
+                                      ) : (
+                                        <Paperclip size={12} />
+                                      )}{" "}
+                                      {files.length}{" "}
+                                      {files.length === 1
+                                        ? "attachment"
+                                        : "attachments"}
                                     </div>
                                   )}
                                 </div>
@@ -1316,8 +1421,7 @@ export default function App() {
                 <ol className="steps">
                   <li>Export your journal before switching computers.</li>
                   <li>
-                    Transfer the JSON backup using your private drive or
-                    AirDrop.
+                    Transfer the ZIP backup using your private drive or AirDrop.
                   </li>
                   <li>
                     Update the app on the other computer, then restore the
@@ -1325,12 +1429,20 @@ export default function App() {
                   </li>
                 </ol>
                 <div className="button-row">
-                  <button className="primary" onClick={backup}>
-                    <ArrowDownToLine size={16} /> Export backup
+                  <button
+                    className="primary"
+                    onClick={backup}
+                    disabled={backupBusy}
+                  >
+                    <ArrowDownToLine size={16} />{" "}
+                    {backupBusy
+                      ? "Preparing backup…"
+                      : "Export journal + media"}
                   </button>
                   <button
                     className="secondary"
                     onClick={() => file.current?.click()}
+                    disabled={backupBusy || blocked}
                   >
                     <ArrowUpFromLine size={16} /> Restore backup
                   </button>
@@ -1339,7 +1451,7 @@ export default function App() {
                   ref={file}
                   hidden
                   type="file"
-                  accept="application/json,.json"
+                  accept="application/json,application/zip,.json,.zip"
                   onChange={(e) => {
                     if (e.target.files?.[0]) importBackup(e.target.files[0]);
                   }}
@@ -1358,9 +1470,22 @@ export default function App() {
                   </button>
                 )}
                 <p className="small muted">
-                  Restore validates the file and downloads a safety backup
-                  before replacing records.
+                  ZIP backups include all original audio, images, videos, and
+                  saved transcripts. Restore validates the archive and downloads
+                  a safety backup before replacing records. Older JSON backups
+                  restore text only and keep existing media.
                 </p>
+                <button
+                  className="text-btn"
+                  onClick={() =>
+                    download(
+                      `dear-diary-text-${dateKey()}.json`,
+                      JSON.stringify(data, null, 2),
+                    )
+                  }
+                >
+                  Export text-only JSON (excludes media)
+                </button>
               </section>
               <section className="panel">
                 <h2>This workspace</h2>
@@ -1368,6 +1493,7 @@ export default function App() {
                   ["Trades", data.trades.length],
                   ["Journal entries", data.entries.length],
                   ["Playbook setups", data.plays.length],
+                  ["Media files", media.length],
                   ["Data location", "This browser"],
                 ].map(([k, v]) => (
                   <div className="setup-row" key={k}>
@@ -1387,6 +1513,14 @@ export default function App() {
                 </p>
               </section>
             </div>
+          )}
+          {page === "Media Library" && (
+            <MediaLibrary
+              records={media}
+              error={mediaError}
+              onOpenDay={(date) => openDay(date)}
+              onBackup={backup}
+            />
           )}
           {page === "Settings" && (
             <div className="sync-grid">
@@ -1472,13 +1606,14 @@ export default function App() {
                 </p>
                 <button
                   className="secondary"
-                  onClick={() => {
+                  disabled={backupBusy}
+                  onClick={async () => {
                     if (
                       confirm(
-                        "Export your current backup and replace this journal with sample records?",
+                        "Export your current backup and replace journal text and trades with sample records? Existing media files will be kept.",
                       )
                     ) {
-                      backup();
+                      if (!(await backup())) return;
                       if (persist(demoJournal()))
                         setNotice(
                           "Sample journal loaded. These are demonstration records, not your actual trading history.",
@@ -1618,7 +1753,7 @@ export default function App() {
         <div
           className="modal-backdrop"
           onClick={(e) => {
-            if (e.target === e.currentTarget) setDay(null);
+            if (e.target === e.currentTarget && !captureBusy) setDay(null);
           }}
         >
           <section
@@ -1636,6 +1771,7 @@ export default function App() {
                 autoFocus
                 className="icon-btn"
                 aria-label="Close day"
+                disabled={captureBusy}
                 onClick={() => setDay(null)}
               >
                 <X size={22} />
@@ -1661,6 +1797,7 @@ export default function App() {
             </div>
             <div className="tabs">
               <button
+                disabled={captureBusy}
                 className={mode === "journal" ? "selected" : ""}
                 onClick={() => {
                   setMode("journal");
@@ -1670,6 +1807,7 @@ export default function App() {
                 <Pencil size={15} /> Journal
               </button>
               <button
+                disabled={captureBusy}
                 className={mode === "trade" ? "selected" : ""}
                 onClick={() => {
                   setMode("trade");
@@ -1680,6 +1818,16 @@ export default function App() {
               </button>
             </div>
             <div className="drawer-body">
+              {mode === "journal" && (
+                <DayMedia
+                  key={day}
+                  date={day}
+                  records={media}
+                  storageError={mediaError}
+                  onTranscript={useTranscript}
+                  onBusy={setCaptureBusy}
+                />
+              )}
               {mode === "journal"
                 ? data.entries
                     .filter((e) => e.date === day)
@@ -1767,6 +1915,7 @@ export default function App() {
                       Title
                       <input
                         name="title"
+                        ref={titleField}
                         required
                         maxLength={160}
                         placeholder="What did today teach you?"
@@ -1777,6 +1926,7 @@ export default function App() {
                       Reflection
                       <textarea
                         name="text"
+                        ref={reflectionField}
                         rows={5}
                         required
                         placeholder="Your plan, your decisions, your emotions, your lesson…"
@@ -1890,7 +2040,7 @@ export default function App() {
                   </>
                 )}
                 <div className="button-row">
-                  <button className="primary">
+                  <button className="primary" disabled={captureBusy}>
                     <Check size={17} /> Save{" "}
                     {mode === "journal" ? "entry" : "trade"}
                   </button>
